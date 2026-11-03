@@ -61,10 +61,14 @@
             </form>
 
             <div class="header-controls">
-                <div class="tool-group" role="group" aria-label="Medya">
-                    <button id="toggle-mic-btn" class="control-btn muted" title="Mikrofon"><i class="fas fa-microphone-slash"></i></button>
-                    <button id="toggle-cam-btn" class="control-btn camera-off" title="Kamera"><i class="fas fa-video-slash"></i></button>
-                    <button id="toggle-screen-btn" class="control-btn" title="Ekran paylaş"><i class="fas fa-desktop"></i></button>
+                <div class="media-wrapper">
+                    <div class="tool-group" role="group" aria-label="Medya">
+                        <button id="toggle-mic-btn" class="control-btn muted" title="Mikrofon"><i class="fas fa-microphone-slash"></i></button>
+                        <button id="toggle-cam-btn" class="control-btn camera-off" title="Kamera"><i class="fas fa-video-slash"></i></button>
+                        <button id="toggle-screen-btn" class="control-btn" title="Ekran paylaş"><i class="fas fa-desktop"></i></button>
+                        <button id="device-menu-btn" class="device-caret" title="Kamera / mikrofon seç"><i class="fas fa-chevron-down"></i></button>
+                    </div>
+                    <div id="device-menu" class="dropdown-menu device-menu hidden"></div>
                 </div>
 
                 <div class="participants-wrapper">

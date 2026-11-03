@@ -6,7 +6,9 @@ function toast(msg, type = 'info') {
     const t = document.createElement('div'); t.className = 'toast ' + type;
     t.innerHTML = `<i class="fas ${type === 'error' ? 'fa-circle-exclamation' : 'fa-circle-info'}"></i><span></span>`;
     t.lastChild.textContent = msg; document.getElementById('toast-root').appendChild(t);
-    setTimeout(() => t.classList.add('out'), 2800); setTimeout(() => t.remove(), 3200);
+    const ms = Math.min(12000, 2800 + msg.length * 40); // uzun mesajlar okunacak kadar kalsın
+    t.style.pointerEvents = 'auto'; t.title = 'Kapatmak için tıkla'; t.onclick = () => t.remove();
+    setTimeout(() => t.classList.add('out'), ms); setTimeout(() => t.remove(), ms + 400);
 }
 function setBusy(btn, busy, label) {
     if (!btn.dataset.label) btn.dataset.label = btn.innerHTML;
@@ -406,7 +408,10 @@ function mediaErrorMessage(err, what) {
         case 'NotAllowedError': case 'PermissionDeniedError':
             return `${what} izni verilmedi. Adres çubuğundaki simgeden izin verip tekrar dene.`;
         case 'NotReadableError': case 'TrackStartError':
-            return `${what} başlatılamadı; başka bir uygulama (Zoom, Teams, Discord, Kamera uygulaması vb.) kullanıyor olabilir. Onu kapatıp tekrar dene.`;
+            return `${what} başlatılamadı${err.triedDevices > 1 ? ` (${err.triedDevices} cihaz denendi)` : ''}. Şunları kontrol et: ` +
+                `1) Bu site başka bir tarayıcıda (Edge, Opera…) veya uygulamada (Zoom, Teams, Discord, OBS) açık olmasın. ` +
+                `2) Windows Ayarlar › Gizlilik ve güvenlik › ${what} › "Masaüstü uygulamalarının erişimine izin ver" açık olsun. ` +
+                `3) Dizüstünde kamera kapağı veya kamera kapatma tuşu (Fn) kapalı olmasın.`;
         case 'NotFoundError': case 'DevicesNotFoundError': case 'OverconstrainedError':
             return `Bu cihazda ${what.toLowerCase()} bulunamadı.`;
         default:
@@ -414,18 +419,44 @@ function mediaErrorMessage(err, what) {
     }
 }
 
-// Bazı (özellikle Windows) kamera sürücüleri belirli çözünürlükte açılamayınca "cihaz kullanılıyor"
-// (NotReadableError) hatası verir. Önce tercih edilen ayarlarla dene, olmazsa kısa bir bekleme
-// sonrası hiçbir kısıt olmadan tekrar dene.
+// Cihaz açma: Windows'ta varsayılan cihaz bazen açılamaz ("cihaz kullanılıyor" / NotReadableError) —
+// ör. Windows Hello IR kamerası, kapalı bir sanal kamera (OBS) veya sürücünün desteklemediği çözünürlük.
+// Sırayla dene: kayıtlı cihaz → tercih edilen ayarlar → kısıtsız → bilgisayardaki diğer tüm cihazlar.
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+function rememberDevice(kind, stream) {
+    const t = stream.getTracks()[0]; const id = t && t.getSettings && t.getSettings().deviceId;
+    if (id) lsSet('lesa_dev_' + kind, id);
+    return stream;
+}
 async function openDevice(kind, preferred) {
-    try {
-        return await navigator.mediaDevices.getUserMedia({ [kind]: preferred });
-    } catch (err) {
-        if (!['NotReadableError', 'TrackStartError', 'OverconstrainedError', 'AbortError'].includes(err && err.name)) throw err;
-        console.warn(`${kind} tercih edilen ayarlarla açılamadı, varsayılanla deneniyor:`, err);
-        await new Promise(r => setTimeout(r, 400));
-        return await navigator.mediaDevices.getUserMedia({ [kind]: true });
+    const savedId = lsGet('lesa_dev_' + kind);
+    const attempts = [];
+    if (savedId) attempts.push({ ...preferred, deviceId: { exact: savedId } });
+    attempts.push(preferred, true);
+    let lastErr = null;
+    const tryOne = async (constraints) => {
+        try { return await navigator.mediaDevices.getUserMedia({ [kind]: constraints }); }
+        catch (err) {
+            lastErr = err;
+            if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError' || err.name === 'SecurityError') throw err; // izin yoksa denemeye devam etmenin anlamı yok
+            console.warn(`${kind} açılamadı`, constraints, err);
+            return null;
+        }
+    };
+    for (const c of attempts) {
+        const s = await tryOne(c);
+        if (s) return rememberDevice(kind, s);
+        await new Promise(r => setTimeout(r, 250));
     }
+    const devices = (await navigator.mediaDevices.enumerateDevices())
+        .filter(d => d.kind === (kind === 'video' ? 'videoinput' : 'audioinput') && d.deviceId && !['default', 'communications', savedId].includes(d.deviceId));
+    for (const d of devices) {
+        const s = await tryOne({ deviceId: { exact: d.deviceId } });
+        if (s) { toast(`Varsayılan cihaz açılamadı, "${d.label || 'diğer cihaz'}" kullanılıyor.`); return rememberDevice(kind, s); }
+    }
+    if (lastErr) lastErr.triedDevices = devices.length + 1;
+    throw lastErr || new Error('Cihaz bulunamadı');
 }
 
 // ---- Bağlantılar ----
@@ -589,7 +620,7 @@ async function setMic(on) {
             const s = await openDevice('audio', { echoCancellation: true, noiseSuppression: true, autoGainControl: true });
             local.mic = s.getAudioTracks()[0];
             camStream.addTrack(local.mic);
-            local.mic.onended = () => { removeTrackFromAll(local.mic); camStream.removeTrack(local.mic); local.mic = null; isMicOn = false; emitMediaState(); refreshLocalUI(); };
+            local.mic.onended = onMicEnded;
             isMicOn = true; emitMediaState(); addTrackToAll(local.mic, camStream);
         } catch (err) { console.error(err); toast(mediaErrorMessage(err, 'Mikrofon'), 'error'); }
         finally { pending.mic = false; refreshLocalUI(); }
@@ -622,6 +653,73 @@ async function setCam(on) {
     isCamOn = false; emitMediaState(); refreshLocalUI();
 }
 toggleCamBtn.addEventListener('click', () => setCam(!isCamOn));
+
+function onMicEnded() {
+    if (!local.mic) return;
+    removeTrackFromAll(local.mic); camStream.removeTrack(local.mic); local.mic = null;
+    isMicOn = false; emitMediaState(); refreshLocalUI();
+}
+
+// ---- Cihaz seçimi (kamera / mikrofon) ----
+const deviceMenu = document.getElementById('device-menu');
+const deviceMenuBtn = document.getElementById('device-menu-btn');
+
+async function switchDevice(kind, deviceId) {
+    const cur = kind === 'video' ? local.cam : local.mic;
+    if (!cur) { lsSet('lesa_dev_' + kind, deviceId); toast('Seçildi; açtığında bu cihaz kullanılacak.'); return; }
+    if (cur.getSettings().deviceId === deviceId) return;
+    try {
+        const constraints = kind === 'video'
+            ? { deviceId: { exact: deviceId }, width: { ideal: 640 }, height: { ideal: 360 } }
+            : { deviceId: { exact: deviceId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+        let s;
+        try { s = await navigator.mediaDevices.getUserMedia({ [kind]: constraints }); }
+        catch (err) { if (err.name === 'NotAllowedError') throw err; s = await navigator.mediaDevices.getUserMedia({ [kind]: { deviceId: { exact: deviceId } } }); }
+        const t = s.getTracks()[0];
+        // replaceTrack yeniden müzakere gerektirmez; karşı taraf kesintisiz yeni cihaza geçer
+        await Promise.all(Object.values(peers).map(({ pc }) => {
+            const sender = pc.getSenders().find(x => x.track === cur);
+            return sender ? sender.replaceTrack(t) : null;
+        }));
+        lsSet('lesa_dev_' + kind, deviceId);
+        camStream.removeTrack(cur); camStream.addTrack(t);
+        cur.onended = null; cur.stop();
+        if (kind === 'video') { local.cam = t; t.onended = () => setCam(false); }
+        else { t.enabled = isMicOn; local.mic = t; t.onended = onMicEnded; }
+        refreshLocalUI();
+    } catch (err) { console.error(err); toast(mediaErrorMessage(err, kind === 'video' ? 'Kamera' : 'Mikrofon'), 'error'); }
+}
+
+async function renderDeviceMenu() {
+    let devices = [];
+    try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (e) {}
+    const section = (kind, inputKind, title, icon) => {
+        const list = devices.filter(d => d.kind === inputKind && d.deviceId && d.deviceId !== 'communications');
+        const activeTrack = kind === 'video' ? local.cam : local.mic;
+        const current = (activeTrack && activeTrack.getSettings().deviceId) || lsGet('lesa_dev_' + kind) || 'default';
+        const items = list.length
+            ? list.map((d, i) => `<button class="device-item ${d.deviceId === current ? 'active' : ''}" data-kind="${kind}" data-id="${esc(d.deviceId)}"><i class="fas ${d.deviceId === current ? 'fa-check' : icon}"></i><span>${esc(d.label || `${title} ${i + 1}`)}</span></button>`).join('')
+            : `<div class="device-empty">${title} bulunamadı</div>`;
+        return `<div class="pop-head">${title}</div>${items}`;
+    };
+    const needsPermission = devices.length && devices.every(d => !d.label);
+    deviceMenu.innerHTML = section('video', 'videoinput', 'Kamera', 'fa-video') + section('audio', 'audioinput', 'Mikrofon', 'fa-microphone') +
+        (needsPermission ? '<div class="device-empty">Cihaz adlarını görmek için önce kamera veya mikrofonu bir kez aç.</div>' : '');
+    deviceMenu.querySelectorAll('.device-item').forEach(b => b.addEventListener('click', async () => {
+        await switchDevice(b.dataset.kind, b.dataset.id); renderDeviceMenu();
+    }));
+}
+deviceMenuBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!deviceMenu.classList.contains('hidden')) return deviceMenu.classList.add('hidden');
+    deviceMenu.innerHTML = '<div class="device-empty">Cihazlar yükleniyor…</div>';
+    deviceMenu.classList.remove('hidden');
+    renderDeviceMenu();
+});
+document.addEventListener('click', (e) => { if (!e.target.closest('#device-menu, #device-menu-btn')) deviceMenu.classList.add('hidden'); });
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', () => { if (!deviceMenu.classList.contains('hidden')) renderDeviceMenu(); });
+}
 
 // ---- Ekran paylaşımı (ses dahil) ----
 async function startScreenShare() {
