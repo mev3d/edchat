@@ -150,12 +150,9 @@ document.getElementById('join-form').addEventListener('submit', async (e) => {
             placeBubble(false);
             if (isDocked()) openChat();
             handleOrientationChange();
-            if (player && player.loadVideoById) {
-                isUserAction = false;
-                if (response.isPlaying) player.loadVideoById(response.videoId, response.time);
-                else player.cueVideoById(response.videoId, response.time);
-                setTimeout(() => isUserAction = true, 1000);
-            }
+            pendingVideo = response.videoId ? { id: response.videoId, time: response.time, play: response.isPlaying } : null;
+            setIdleScene(!response.videoId);
+            loadPendingVideo();
         } else { toast(response.message, 'error'); if (response.message === 'Hatalı şifre!') joinPassword.select(); }
     });
 });
@@ -216,9 +213,21 @@ function onYouTubeIframeAPIReady() {
 // YouTube API bu dosyadan önce hazır olduysa geri çağrı hiç gelmez; oynatıcıyı kendimiz kuralım
 if (window.YT && window.YT.Player) onYouTubeIframeAPIReady();
 
+// Odada henüz video yoksa oynatıcının yerinde canlı oda sahnesi görünür
+let pendingVideo = null;
+function setIdleScene(on) { document.getElementById('idle-scene').classList.toggle('hidden', !on); }
+function loadPendingVideo() {
+    if (!pendingVideo || !player || !player.loadVideoById) return;
+    const v = pendingVideo; pendingVideo = null;
+    isUserAction = false;
+    if (v.play) player.loadVideoById(v.id, v.time); else player.cueVideoById(v.id, v.time);
+    setTimeout(() => isUserAction = true, 1000);
+}
+
 let uiInterval;
 function onPlayerReady(event) {
     initCustomControls();
+    loadPendingVideo();
 }
 
 function onPlayerStateChange(event) {
@@ -238,7 +247,7 @@ document.getElementById('yt-form').addEventListener('submit', (e) => {
     const videoId = match ? match[1] : (/^[\w-]{11}$/.test(url) ? url : null);
     if (videoId) { socket.emit('loadVideo', videoId); ytUrlInput.value = ''; ytUrlInput.blur(); } else { toast("Geçerli bir YouTube linki yapıştır.", 'error'); ytUrlInput.select(); }
 });
-socket.on('videoChange', (videoId) => { if(player && player.loadVideoById) { isUserAction = false; player.loadVideoById(videoId); setTimeout(() => isUserAction = true, 1000); } });
+socket.on('videoChange', (videoId) => { setIdleScene(false); if (!player || !player.loadVideoById) { pendingVideo = { id: videoId, time: 0, play: true }; return; } if (player && player.loadVideoById) { isUserAction = false; player.loadVideoById(videoId); setTimeout(() => isUserAction = true, 1000); } });
 socket.on('videoPlay', (time) => { if(player && player.playVideo) { isUserAction = false; if (Math.abs(player.getCurrentTime() - time) > 2) player.seekTo(time); player.playVideo(); setTimeout(() => isUserAction = true, 500); } });
 socket.on('videoPause', () => { if(player && player.pauseVideo) { isUserAction = false; player.pauseVideo(); setTimeout(() => isUserAction = true, 500); } });
 

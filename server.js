@@ -26,7 +26,7 @@ io.on('connection', (socket) => {
     socket.on('createRoom', (password, callback) => {
         const roomId = Math.random().toString(36).substring(2, 8);
         rooms[roomId] = {
-            password: password, videoId: 'dQw4w9WgXcQ', time: 0, hostId: socket.id, freeControl: true,
+            password: password, videoId: null, time: 0, hostId: socket.id, freeControl: true,
             updatedAt: Date.now(), isPlaying: false, messages: [], users: {}
         };
         callback(roomId);

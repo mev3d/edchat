@@ -15,6 +15,7 @@
 
     <!-- ODA OLUŞTUR -->
     <div id="create-screen" class="screen gate hidden">
+        <div data-scene></div>
         <form class="gate-card" id="create-form">
             <div class="brand-mark gate-logo" role="img" aria-label="Lesa"></div>
             <h1>Birlikte izle</h1>
@@ -31,6 +32,7 @@
 
     <!-- ODAYA KATIL -->
     <div id="password-screen" class="screen gate hidden">
+        <div data-scene></div>
         <form class="gate-card" id="join-form">
             <div class="brand-mark gate-logo" role="img" aria-label="Lesa"></div>
             <div class="step-icon"><i class="fas fa-lock"></i></div>
@@ -101,6 +103,7 @@
 
                 <div class="player-wrapper">
                     <div id="player"></div>
+                    <div id="idle-scene" class="idle-scene hidden"><div data-scene></div><div class="idle-hint"><i class="fab fa-youtube"></i> Yukarıya bir YouTube linki yapıştır, birlikte izleyelim</div></div>
                     <div id="player-overlay"></div>
                     <video id="main-screenshare" autoplay playsinline class="hidden"></video>
                     <div id="screenshare-label" class="screenshare-label hidden"></div>
@@ -182,5 +185,6 @@
     <script src="/socket.io/socket.io.js"></script>
     <script src="script.js"></script>
     <script src="pomodoro.js"></script>
+    <script src="scene.js"></script>
 </body>
 </html>
