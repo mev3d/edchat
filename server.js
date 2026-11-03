@@ -62,9 +62,13 @@ io.on('connection', (socket) => {
 
     socket.on('mediaState', (state) => {
         if (socket.roomId && rooms[socket.roomId] && rooms[socket.roomId].users[socket.id]) {
-            rooms[socket.roomId].users[socket.id].isMicOn = state.isMicOn;
-            rooms[socket.roomId].users[socket.id].isCamOn = state.isCamOn;
-            rooms[socket.roomId].users[socket.id].isScreenSharing = state.isScreenSharing || false;
+            const user = rooms[socket.roomId].users[socket.id];
+            user.isMicOn = !!state.isMicOn;
+            user.isCamOn = !!state.isCamOn;
+            user.isScreenSharing = !!state.isScreenSharing;
+            // İstemci, gelen akışın kamera mı ekran mı olduğunu bu kimliklerden anlar
+            user.camStreamId = typeof state.camStreamId === 'string' ? state.camStreamId : null;
+            user.screenStreamId = typeof state.screenStreamId === 'string' ? state.screenStreamId : null;
             io.to(socket.roomId).emit('update-users', rooms[socket.roomId].users);
         }
     });

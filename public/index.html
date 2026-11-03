@@ -39,7 +39,7 @@
             <label class="field"><i class="fas fa-user"></i><input type="text" id="join-username" placeholder="Kullanıcı adın" autocomplete="nickname" maxlength="24"></label>
             <label class="field"><i class="fas fa-key"></i><input type="password" id="join-password" placeholder="Oda şifresi" autocomplete="off"></label>
             <button type="submit" id="join-btn" class="btn btn-primary btn-block">Odaya Gir</button>
-            <p class="gate-hint"><i class="fas fa-circle-info"></i> Girişte tarayıcı kamera/mikrofon izni isteyebilir; ikisi de kapalı başlar.</p>
+            <p class="gate-hint"><i class="fas fa-circle-info"></i> Kamera ve mikrofon kapalı başlar; açtığında tarayıcı izin ister.</p>
             <a href="/" class="link-btn">Yeni oda kur</a>
         </form>
     </div>
@@ -98,6 +98,7 @@
                     <div id="player"></div>
                     <div id="player-overlay"></div>
                     <video id="main-screenshare" autoplay playsinline class="hidden"></video>
+                    <div id="screenshare-label" class="screenshare-label hidden"></div>
                 </div>
 
                 <div class="custom-video-controls" id="custom-video-controls">

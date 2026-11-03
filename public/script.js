@@ -133,9 +133,7 @@ document.getElementById('join-form').addEventListener('submit', async (e) => {
     if (!username) { toast("Bir kullanıcı adı yaz.", 'error'); return joinUsername.focus(); }
     if (!password) { toast("Oda şifresini yaz.", 'error'); return joinPassword.focus(); }
     setBusy(joinBtn, true, 'Bağlanıyor…');
-    // Bağlantılar kurulmadan önce medya hazır olmalı (kamera/mikrofon kapalı başlar)
-    // İzin penceresi cevapsız kalırsa girişi sonsuza kadar bekletme
-    await Promise.race([getMediaStream(true), new Promise(r => setTimeout(r, 10000))]);
+    // Kamera/mikrofon kapalı başlar; izin yalnızca ilgili düğmeye basınca istenir
     socket.emit('joinRoom', { roomId: currentRoomId, password, username }, (response) => {
         setBusy(joinBtn, false);
         if (response.success) {
@@ -360,6 +358,9 @@ function initCustomControls() {
 }
 
 // --- WEBRTC ---
+// Her kişiyle tek bir RTCPeerConnection kurulur. Mikrofon, kamera ve ekran ayrı izler (track) olarak
+// istendiğinde eklenir/çıkarılır; bağlantı "perfect negotiation" ile kendini yeniden müzakere eder.
+// Böylece medyayı odaya girdikten sonra istediğin an açıp kapatabilirsin ve karşı taraf hemen görür.
 const toggleMicBtn = document.getElementById('toggle-mic-btn');
 const toggleCamBtn = document.getElementById('toggle-cam-btn');
 const toggleScreenBtn = document.getElementById('toggle-screen-btn');
@@ -370,163 +371,278 @@ const participantsBtn = document.getElementById('participants-btn');
 const participantsDropdown = document.getElementById('participants-dropdown');
 const participantsList = document.getElementById('participants-list');
 const userCountSpan = document.getElementById('user-count');
+const mainScreenshare = document.getElementById('main-screenshare');
+const screenshareLabel = document.getElementById('screenshare-label');
 
 // Mobil tarayıcılar ekran paylaşımını desteklemiyor; düğmeyi hiç gösterme
 if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) toggleScreenBtn.classList.add('hidden');
 
-let localStream = null; let screenStream = null;
 let isMicOn = false; let isCamOn = false; let isScreenSharing = false;
-let currentUsers = {}; 
-const peers = {}; const locallyMutedUsers = new Set(); 
-const configuration = { 'iceServers': [{'urls': 'stun:stun.l.google.com:19302'}] };
+let currentUsers = {};
+const peers = {}; const locallyMutedUsers = new Set(); const userVolumes = {};
+const remoteMedia = {}; // userId -> { streams: { streamId: MediaStream } }
+const configuration = { iceServers: [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    { urls: 'stun:global.stun.twilio.com:3478' }
+] };
 
-let mediaRequested = false;
+// Yerel medya: mikrofon + kamera tek akışta (camStream), ekran ayrı akışta (screenStream)
+const camStream = new MediaStream();
+let screenStream = null;
+const local = { mic: null, cam: null, screenVideo: null, screenAudio: null };
+const pending = { mic: false, cam: false, screen: false };
 
-async function getMediaStream(silent) {
-    if (mediaRequested) return true;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { if (!silent) toast('Tarayıcın kamera/mikrofonu desteklemiyor.', 'error'); return false; }
-    try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        localStream.getAudioTracks()[0].enabled = false; localStream.getVideoTracks()[0].enabled = false;
-        localVideo.srcObject = localStream; cameraBoxesContainer.classList.remove('hidden');
-        mediaRequested = true;
-        
-        // Update peer connections with new tracks
-        for (let userId in peers) {
-            localStream.getTracks().forEach(track => {
-                const sender = peers[userId].getSenders().find(s => s.track && s.track.kind === track.kind);
-                if (!sender) peers[userId].addTrack(track, localStream);
-            });
-        }
-        return true;
-    } catch (err) { 
-        console.error("Medya cihazlarına erişilemedi:", err); 
-        toast(silent ? "Kamera/mikrofon izni yok; sadece izleyip yazabilirsin." : "Kamera veya mikrofona erişilemedi. Tarayıcı izinlerini kontrol et.", 'error');
-        return false; 
+function localTracks() {
+    const out = [];
+    if (local.mic) out.push([local.mic, camStream]);
+    if (local.cam) out.push([local.cam, camStream]);
+    if (local.screenVideo) out.push([local.screenVideo, screenStream]);
+    if (local.screenAudio) out.push([local.screenAudio, screenStream]);
+    return out;
+}
+
+function mediaErrorMessage(err, what) {
+    switch (err && err.name) {
+        case 'NotAllowedError': case 'PermissionDeniedError':
+            return `${what} izni verilmedi. Adres çubuğundaki simgeden izin verip tekrar dene.`;
+        case 'NotReadableError': case 'TrackStartError':
+            return `${what} başka bir uygulama veya sekme tarafından kullanılıyor. Onu kapatıp tekrar dene.`;
+        case 'NotFoundError': case 'DevicesNotFoundError': case 'OverconstrainedError':
+            return `Bu cihazda ${what.toLowerCase()} bulunamadı.`;
+        default:
+            return `${what} açılamadı${err && err.message ? ': ' + err.message : '.'}`;
     }
 }
 
-function emitMediaState() {
-    socket.emit('mediaState', { isMicOn, isCamOn: isCamOn || isScreenSharing, isScreenSharing });
-    if (!isCamOn && !isScreenSharing) localCameraBox.classList.add('hidden'); 
-    else localCameraBox.classList.remove('hidden');
-}
+// ---- Bağlantılar ----
+function getPeer(userId) {
+    if (peers[userId]) return peers[userId];
+    const pc = new RTCPeerConnection(configuration);
+    const peer = { pc, makingOffer: false, ignoreOffer: false, polite: socket.id < userId };
+    peers[userId] = peer;
 
-function manageScreenshareView() {
-    const mainScreenshare = document.getElementById('main-screenshare');
-    const playerDiv = document.getElementById('player');
-    
-    let sharingUser = null;
-    if (isScreenSharing && screenStream) {
-        sharingUser = { id: socket.id, stream: screenStream };
-    } else {
-        for (let userId in currentUsers) {
-            if (currentUsers[userId].isScreenSharing) {
-                const box = document.getElementById(`camera-${userId}`);
-                if (box) {
-                    const vid = box.querySelector('video');
-                    if (vid && vid.srcObject) {
-                        sharingUser = { id: userId, stream: vid.srcObject };
-                        box.classList.add('hidden');
-                    }
-                }
-            }
-        }
-    }
-
-    if (sharingUser) {
-        if (mainScreenshare.srcObject !== sharingUser.stream) mainScreenshare.srcObject = sharingUser.stream;
-        mainScreenshare.muted = (sharingUser.id === socket.id);
-        mainScreenshare.classList.remove('hidden');
-        playerDiv.style.visibility = 'hidden'; 
-    } else {
-        mainScreenshare.srcObject = null;
-        mainScreenshare.classList.add('hidden');
-        playerDiv.style.visibility = 'visible'; 
-    }
-}
-
-toggleMicBtn.addEventListener('click', async () => {
-    const success = await getMediaStream();
-    if (!success) return;
-    isMicOn = !isMicOn;
-    if (localStream) localStream.getAudioTracks()[0].enabled = isMicOn;
-    if (isMicOn) {
-        toggleMicBtn.className = 'control-btn'; toggleMicBtn.innerHTML = '<i class="fas fa-microphone"></i>';
-    } else {
-        toggleMicBtn.className = 'control-btn muted'; toggleMicBtn.innerHTML = '<i class="fas fa-microphone-slash"></i>';
-    }
-    emitMediaState();
-});
-
-toggleCamBtn.addEventListener('click', async () => {
-    if (isScreenSharing) return toast("Ekran paylaşımı açıkken kamera açılamaz.", 'error');
-    const success = await getMediaStream();
-    if (!success) return;
-    isCamOn = !isCamOn;
-    if (localStream) localStream.getVideoTracks()[0].enabled = isCamOn;
-    if (isCamOn) {
-        toggleCamBtn.className = 'control-btn'; toggleCamBtn.innerHTML = '<i class="fas fa-video"></i>';
-    } else {
-        toggleCamBtn.className = 'control-btn camera-off'; toggleCamBtn.innerHTML = '<i class="fas fa-video-slash"></i>';
-    }
-    localVideo.srcObject = localStream; localVideo.style.display = isCamOn ? 'block' : 'none'; 
-    emitMediaState();
-});
-
-toggleScreenBtn.addEventListener('click', async () => {
-    if (!isScreenSharing) {
+    pc.onnegotiationneeded = async () => {
         try {
-            screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-            isScreenSharing = true;
-            if (isCamOn) {
-                isCamOn = false; localStream.getVideoTracks()[0].enabled = false;
-                toggleCamBtn.className = 'control-btn camera-off'; toggleCamBtn.innerHTML = '<i class="fas fa-video-slash"></i>';
-            }
-            toggleScreenBtn.classList.add('muted'); toggleScreenBtn.innerHTML = '<i class="fas fa-times-circle"></i>'; 
-            localVideo.srcObject = screenStream; localVideo.style.display = 'block';
+            peer.makingOffer = true;
+            await pc.setLocalDescription();
+            socket.emit('signal', userId, { sdp: pc.localDescription });
+        } catch (err) { console.error('Teklif oluşturulamadı:', err); }
+        finally { peer.makingOffer = false; }
+    };
+    pc.onicecandidate = ({ candidate }) => { if (candidate) socket.emit('signal', userId, { ice: candidate }); };
+    pc.ontrack = ({ track, streams }) => {
+        const stream = streams[0] || new MediaStream([track]);
+        const rm = remoteMedia[userId] = remoteMedia[userId] || { streams: {} };
+        rm.streams[stream.id] = stream;
+        stream.onremovetrack = () => renderRemote(userId);
+        track.onunmute = () => renderRemote(userId);
+        renderRemote(userId);
+    };
+    pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed' && pc.restartIce) pc.restartIce(); };
 
-            const screenVideoTrack = screenStream.getVideoTracks()[0];
-            const screenAudioTrack = screenStream.getAudioTracks()[0];
-            for (let userId in peers) {
-                const videoSender = peers[userId].getSenders().find(s => s.track && s.track.kind === 'video');
-                if (videoSender) videoSender.replaceTrack(screenVideoTrack);
-                
-                if (screenAudioTrack) {
-                    const audioSender = peers[userId].getSenders().find(s => s.track && s.track.kind === 'audio');
-                    if (audioSender) audioSender.replaceTrack(screenAudioTrack);
-                }
+    localTracks().forEach(([track, stream]) => pc.addTrack(track, stream));
+    return peer;
+}
+
+function ensurePeers() {
+    Object.keys(currentUsers).forEach(id => { if (id !== socket.id) getPeer(id); });
+}
+function addTrackToAll(track, stream) {
+    ensurePeers();
+    Object.values(peers).forEach(({ pc }) => {
+        if (!pc.getSenders().some(s => s.track === track)) pc.addTrack(track, stream);
+    });
+}
+function removeTrackFromAll(track) {
+    if (!track) return;
+    Object.values(peers).forEach(({ pc }) => {
+        const sender = pc.getSenders().find(s => s.track === track);
+        if (sender) pc.removeTrack(sender);
+    });
+}
+
+socket.on('signal', async (from, msg) => {
+    const peer = getPeer(from); const pc = peer.pc;
+    try {
+        if (msg.sdp) {
+            const collision = msg.sdp.type === 'offer' && (peer.makingOffer || pc.signalingState !== 'stable');
+            peer.ignoreOffer = !peer.polite && collision;
+            if (peer.ignoreOffer) return;
+            await pc.setRemoteDescription(msg.sdp);
+            if (msg.sdp.type === 'offer') {
+                await pc.setLocalDescription();
+                socket.emit('signal', from, { sdp: pc.localDescription });
             }
-            emitMediaState();
-            manageScreenshareView();
-            screenVideoTrack.onended = () => { stopScreenSharing(); };
-        } catch (err) { console.error("Ekran paylaşılamadı:", err); }
-    } else { stopScreenSharing(); }
+        } else if (msg.ice) {
+            try { await pc.addIceCandidate(msg.ice); }
+            catch (err) { if (!peer.ignoreOffer) console.error('ICE adayı eklenemedi:', err); }
+        }
+    } catch (err) { console.error('Sinyal hatası:', err); }
 });
 
-function stopScreenSharing() {
-    if (!isScreenSharing) return;
-    isScreenSharing = false;
-    if (screenStream) { screenStream.getTracks().forEach(track => track.stop()); screenStream = null; }
-    toggleScreenBtn.classList.remove('muted'); toggleScreenBtn.innerHTML = '<i class="fas fa-desktop"></i>';
-    localVideo.srcObject = localStream; localVideo.style.display = 'none';
+// ---- Durum bildirimi & arayüz ----
+function emitMediaState() {
+    socket.emit('mediaState', {
+        isMicOn, isCamOn, isScreenSharing,
+        camStreamId: camStream.id, screenStreamId: screenStream ? screenStream.id : null
+    });
+}
+function setBtn(btn, on, onIcon, offIcon, offClass, label) {
+    btn.className = 'control-btn' + (on ? '' : ' ' + offClass);
+    btn.innerHTML = `<i class="fas ${on ? onIcon : offIcon}"></i>`;
+    btn.title = `${label}: ${on ? 'açık' : 'kapalı'}`;
+}
+function refreshLocalUI() {
+    setBtn(toggleMicBtn, isMicOn, 'fa-microphone', 'fa-microphone-slash', 'muted', 'Mikrofon');
+    setBtn(toggleCamBtn, isCamOn, 'fa-video', 'fa-video-slash', 'camera-off', 'Kamera');
+    toggleScreenBtn.className = 'control-btn' + (isScreenSharing ? ' muted' : '');
+    toggleScreenBtn.innerHTML = `<i class="fas ${isScreenSharing ? 'fa-stop' : 'fa-desktop'}"></i>`;
+    toggleScreenBtn.title = isScreenSharing ? 'Paylaşımı durdur' : 'Ekran paylaş';
+    [toggleMicBtn, toggleCamBtn, toggleScreenBtn].forEach(b => b.classList.toggle('pending', pending[b === toggleMicBtn ? 'mic' : b === toggleCamBtn ? 'cam' : 'screen']));
 
-    const camVideoTrack = localStream.getVideoTracks()[0];
-    const camAudioTrack = localStream.getAudioTracks()[0];
-    for (let userId in peers) {
-        const videoSender = peers[userId].getSenders().find(s => s.track && s.track.kind === 'video');
-        if (videoSender) videoSender.replaceTrack(camVideoTrack);
-
-        const audioSender = peers[userId].getSenders().find(s => s.track && s.track.kind === 'audio');
-        if (audioSender) audioSender.replaceTrack(camAudioTrack);
-    }
-    emitMediaState();
+    if (isCamOn && local.cam) {
+        if (!localVideo.srcObject || localVideo.srcObject.getVideoTracks()[0] !== local.cam) localVideo.srcObject = new MediaStream([local.cam]);
+        localCameraBox.classList.remove('hidden');
+    } else { localCameraBox.classList.add('hidden'); localVideo.srcObject = null; }
+    cameraBoxesContainer.classList.remove('hidden');
     manageScreenshareView();
 }
 
-participantsBtn.addEventListener('click', (e) => { 
+function createRemoteBox(userId) {
+    const box = document.createElement('div');
+    box.className = 'camera-box hidden'; box.id = `camera-${userId}`;
+    const n = cameraBoxesContainer.querySelectorAll('.camera-box').length;
+    box.style.left = `${12 + (n % 4) * 196}px`; box.style.top = `${12 + Math.floor(n / 4) * 128}px`;
+    const vid = document.createElement('video'); vid.className = 'remote-video'; vid.autoplay = true; vid.playsInline = true;
+    const ph = document.createElement('div'); ph.className = 'camera-placeholder'; ph.textContent = 'Kamera kapalı';
+    const label = document.createElement('span'); label.className = 'camera-label';
+    box.append(vid, ph, label); cameraBoxesContainer.appendChild(box);
+    return box;
+}
+
+function renderRemote(userId) {
+    const rm = remoteMedia[userId]; const user = currentUsers[userId];
+    if (!rm || !user) return;
+    const screenS = user.screenStreamId ? rm.streams[user.screenStreamId] : null;
+    const camS = (user.camStreamId && rm.streams[user.camStreamId]) || Object.values(rm.streams).find(s => s !== screenS && s.id !== user.screenStreamId);
+    if (camS) {
+        const box = document.getElementById(`camera-${userId}`) || createRemoteBox(userId);
+        const vid = box.querySelector('video');
+        if (vid.srcObject !== camS) vid.srcObject = camS;
+        vid.muted = locallyMutedUsers.has(userId);
+        vid.volume = userVolumes[userId] != null ? userVolumes[userId] : 1;
+        vid.play().catch(() => {});
+        box.querySelector('.camera-label').textContent = user.username + (user.isMicOn ? '' : ' 🔇');
+        // Kamera kapalıyken kutu gizlenir ama sesi çalmaya devam eder
+        box.classList.toggle('hidden', !(user.isCamOn && camS.getVideoTracks().length));
+    }
+    manageScreenshareView();
+}
+
+function manageScreenshareView() {
+    const playerDiv = document.getElementById('player');
+    let share = null;
+    if (isScreenSharing && screenStream) share = { id: socket.id, stream: screenStream, name: 'Sen' };
+    else {
+        for (const id in currentUsers) {
+            const u = currentUsers[id]; const rm = remoteMedia[id];
+            if (u.isScreenSharing && u.screenStreamId && rm && rm.streams[u.screenStreamId]) { share = { id, stream: rm.streams[u.screenStreamId], name: u.username }; break; }
+        }
+    }
+    if (share) {
+        if (mainScreenshare.srcObject !== share.stream) mainScreenshare.srcObject = share.stream;
+        mainScreenshare.muted = share.id === socket.id; // kendi ekran sesini yankı yapmasın diye duyma
+        mainScreenshare.play().catch(() => {});
+        mainScreenshare.classList.remove('hidden');
+        screenshareLabel.innerHTML = `<i class="fas fa-desktop"></i> ${esc(share.name)} ekran paylaşıyor`;
+        screenshareLabel.classList.remove('hidden');
+        playerDiv.style.visibility = 'hidden';
+    } else {
+        mainScreenshare.srcObject = null;
+        mainScreenshare.classList.add('hidden');
+        screenshareLabel.classList.add('hidden');
+        playerDiv.style.visibility = 'visible';
+    }
+}
+
+// ---- Mikrofon ----
+async function setMic(on) {
+    if (pending.mic) return;
+    if (on && !local.mic) {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return toast('Tarayıcın mikrofonu desteklemiyor.', 'error');
+        pending.mic = true; refreshLocalUI();
+        try {
+            const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+            local.mic = s.getAudioTracks()[0];
+            camStream.addTrack(local.mic);
+            local.mic.onended = () => { removeTrackFromAll(local.mic); camStream.removeTrack(local.mic); local.mic = null; isMicOn = false; emitMediaState(); refreshLocalUI(); };
+            isMicOn = true; emitMediaState(); addTrackToAll(local.mic, camStream);
+        } catch (err) { console.error(err); toast(mediaErrorMessage(err, 'Mikrofon'), 'error'); }
+        finally { pending.mic = false; refreshLocalUI(); }
+        return;
+    }
+    // Açık/kapalı geçişi izi kaldırmadan yapılır: anında olur, yeniden bağlantı gerekmez
+    if (local.mic) local.mic.enabled = on;
+    isMicOn = on && !!local.mic; emitMediaState(); refreshLocalUI();
+}
+toggleMicBtn.addEventListener('click', () => setMic(!isMicOn));
+
+// ---- Kamera ----
+async function setCam(on) {
+    if (pending.cam) return;
+    if (on) {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return toast('Tarayıcın kamerayı desteklemiyor.', 'error');
+        pending.cam = true; refreshLocalUI();
+        try {
+            const s = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24 } } });
+            local.cam = s.getVideoTracks()[0];
+            camStream.addTrack(local.cam);
+            local.cam.onended = () => setCam(false);
+            isCamOn = true; emitMediaState(); addTrackToAll(local.cam, camStream);
+        } catch (err) { console.error(err); toast(mediaErrorMessage(err, 'Kamera'), 'error'); }
+        finally { pending.cam = false; refreshLocalUI(); }
+        return;
+    }
+    // Kapatırken izi tamamen durdur: kamera ışığı da söner
+    if (local.cam) { removeTrackFromAll(local.cam); camStream.removeTrack(local.cam); local.cam.onended = null; local.cam.stop(); local.cam = null; }
+    isCamOn = false; emitMediaState(); refreshLocalUI();
+}
+toggleCamBtn.addEventListener('click', () => setCam(!isCamOn));
+
+// ---- Ekran paylaşımı (ses dahil) ----
+async function startScreenShare() {
+    if (pending.screen || isScreenSharing) return;
+    pending.screen = true; refreshLocalUI();
+    try {
+        const s = await navigator.mediaDevices.getDisplayMedia({
+            video: { frameRate: { ideal: 30 } },
+            audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+            systemAudio: 'include', selfBrowserSurface: 'exclude'
+        });
+        screenStream = s;
+        local.screenVideo = s.getVideoTracks()[0];
+        local.screenAudio = s.getAudioTracks()[0] || null;
+        if ('contentHint' in local.screenVideo) local.screenVideo.contentHint = 'motion';
+        local.screenVideo.onended = stopScreenSharing;
+        isScreenSharing = true; emitMediaState();
+        s.getTracks().forEach(t => addTrackToAll(t, s));
+        if (!local.screenAudio) toast('Ekran sesi paylaşılmıyor. Sesli paylaşmak için pencerede "Sekme sesini/Sistem sesini paylaş" seçeneğini işaretle.');
+    } catch (err) {
+        if (err && err.name !== 'NotAllowedError' && err.name !== 'AbortError') toast(mediaErrorMessage(err, 'Ekran paylaşımı'), 'error');
+        screenStream = null;
+    } finally { pending.screen = false; refreshLocalUI(); }
+}
+function stopScreenSharing() {
+    if (!isScreenSharing) return;
+    [local.screenVideo, local.screenAudio].forEach(t => { if (t) { removeTrackFromAll(t); t.onended = null; t.stop(); } });
+    local.screenVideo = null; local.screenAudio = null; screenStream = null;
+    isScreenSharing = false; emitMediaState(); refreshLocalUI();
+}
+toggleScreenBtn.addEventListener('click', () => { if (isScreenSharing) stopScreenSharing(); else startScreenShare(); });
+
+participantsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    participantsDropdown.classList.toggle('hidden'); 
+    participantsDropdown.classList.toggle('hidden');
 });
 
 document.addEventListener('click', (e) => {
@@ -546,108 +662,76 @@ socket.on('update-users', (usersMap) => {
         let actionsHtml = '';
         if (!isMe) {
             const isMuted = locallyMutedUsers.has(userId);
+            const vol = Math.round((userVolumes[userId] != null ? userVolumes[userId] : 1) * 100);
             actionsHtml = `
                 <div class="participant-controls">
-                    <input type="range" class="remote-vol-slider" data-id="${userId}" min="0" max="100" value="${isMuted ? 0 : 100}" title="Kişisel Ses">
-                    <button class="host-action-btn ${isMuted ? 'muted' : ''} mute-remote-btn" data-id="${userId}" title="Sesi Aç/Kapat"><i class="fas ${isMuted ? 'fa-volume-mute' : 'fa-volume-up'}"></i></button>`;
-            
-            // Host actions
+                    <input type="range" class="remote-vol-slider" data-id="${esc(userId)}" min="0" max="100" value="${isMuted ? 0 : vol}" title="Kişisel ses">
+                    <button class="host-action-btn ${isMuted ? 'muted' : ''} mute-remote-btn" data-id="${esc(userId)}" title="Sesi aç/kapat"><i class="fas ${isMuted ? 'fa-volume-mute' : 'fa-volume-up'}"></i></button>`;
+
+            // Yönetici eylemleri
             if (myId === currentHostId) {
                 actionsHtml += `
-                    <button class="host-action-btn force-off" onclick="socket.emit('forceMute', '${userId}')" title="Kişinin Mikrofonunu Kapat"><i class="fas fa-microphone-slash"></i></button>
-                    <button class="host-action-btn force-off" onclick="socket.emit('forceCamOff', '${userId}')" title="Kişinin Kamerasını Kapat"><i class="fas fa-video-slash"></i></button>
+                    <button class="host-action-btn force-off" data-action="forceMute" data-id="${esc(userId)}" title="Mikrofonunu kapat"><i class="fas fa-microphone-slash"></i></button>
+                    <button class="host-action-btn force-off" data-action="forceCamOff" data-id="${esc(userId)}" title="Kamerasını kapat"><i class="fas fa-video-slash"></i></button>
                 `;
             }
             actionsHtml += `</div>`;
         }
-        const media = `<span class="p-media"><i class="fas ${user.isMicOn ? 'fa-microphone on' : 'fa-microphone-slash'}"></i><i class="fas ${user.isScreenSharing ? 'fa-desktop on' : (user.isCamOn ? 'fa-video on' : 'fa-video-slash')}"></i></span>`;
+        const media = `<span class="p-media"><i class="fas ${user.isMicOn ? 'fa-microphone on' : 'fa-microphone-slash'}"></i><i class="fas ${user.isCamOn ? 'fa-video on' : 'fa-video-slash'}"></i>${user.isScreenSharing ? '<i class="fas fa-desktop on"></i>' : ''}</span>`;
         li.innerHTML = `<div class="participant-header"><span class="p-avatar">${esc([...String(user.username)][0] || '?')}</span><span class="p-name">${esc(user.username)}${isMe ? '<small>(sen)</small>' : ''}</span>${user.isHost ? '<i class="fas fa-crown p-host" title="Yönetici"></i>' : ''}${media}</div>${actionsHtml}`;
         participantsList.appendChild(li);
-
-        if (!isMe) {
-            const remoteBox = document.getElementById(`camera-${userId}`);
-            if (remoteBox) { 
-                if (!user.isCamOn) remoteBox.classList.add('hidden'); 
-                else remoteBox.classList.remove('hidden'); 
-            }
-        }
+        if (!isMe) renderRemote(userId);
     });
+    ensurePeers();
 
-    // Ses Slider Event Listener
-    document.querySelectorAll('.remote-vol-slider').forEach(slider => {
+    // Kişisel ses ayarı
+    participantsList.querySelectorAll('.remote-vol-slider').forEach(slider => {
         slider.addEventListener('input', (e) => {
-            const targetId = e.target.getAttribute('data-id'); 
-            const videoElem = document.querySelector(`#camera-${targetId} video`);
-            if (videoElem) videoElem.volume = e.target.value / 100;
+            const targetId = e.target.getAttribute('data-id');
+            userVolumes[targetId] = e.target.value / 100;
+            const videoElem = document.querySelector(`#camera-${CSS.escape(targetId)} video`);
+            if (videoElem) { videoElem.volume = userVolumes[targetId]; videoElem.muted = userVolumes[targetId] === 0 || locallyMutedUsers.has(targetId); }
         });
     });
 
-    // Mevcut Mute Butonu Event Listener
-    document.querySelectorAll('.mute-remote-btn').forEach(btn => {
+    // Kişiyi sessize alma (sadece senin için)
+    participantsList.querySelectorAll('.mute-remote-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             const targetBtn = e.target.closest('.mute-remote-btn');
-            const targetId = targetBtn.getAttribute('data-id'); 
-            const videoElem = document.querySelector(`#camera-${targetId} video`);
-            const slider = document.querySelector(`.remote-vol-slider[data-id="${targetId}"]`);
+            const targetId = targetBtn.getAttribute('data-id');
+            const videoElem = document.querySelector(`#camera-${CSS.escape(targetId)} video`);
+            const slider = participantsList.querySelector(`.remote-vol-slider[data-id="${CSS.escape(targetId)}"]`);
             if (locallyMutedUsers.has(targetId)) {
-                locallyMutedUsers.delete(targetId); targetBtn.innerHTML = '<i class="fas fa-volume-up"></i>'; 
+                locallyMutedUsers.delete(targetId); targetBtn.innerHTML = '<i class="fas fa-volume-up"></i>';
                 targetBtn.classList.remove('muted');
                 if (videoElem) videoElem.muted = false;
-                if (slider) slider.value = 100;
+                if (slider) slider.value = Math.round((userVolumes[targetId] || 1) * 100);
             } else {
-                locallyMutedUsers.add(targetId); targetBtn.innerHTML = '<i class="fas fa-volume-mute"></i>'; 
+                locallyMutedUsers.add(targetId); targetBtn.innerHTML = '<i class="fas fa-volume-mute"></i>';
                 targetBtn.classList.add('muted');
                 if (videoElem) videoElem.muted = true;
                 if (slider) slider.value = 0;
             }
         });
     });
-    
-    setTimeout(manageScreenshareView, 200);
-});
 
-socket.on('user-joined', (userId) => { peers[userId] = createPeerConnection(userId, true); });
-socket.on('signal', async (userId, message) => {
-    if (!peers[userId]) peers[userId] = createPeerConnection(userId, false);
-    const pc = peers[userId];
-    if (message.ice) pc.addIceCandidate(new RTCIceCandidate(message.ice));
-    else if (message.sdp) {
-        await pc.setRemoteDescription(new RTCSessionDescription(message.sdp));
-        if (message.sdp.type === 'offer') { const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); socket.emit('signal', userId, { sdp: pc.localDescription }); }
-    }
-});
+    participantsList.querySelectorAll('[data-action]').forEach(btn => {
+        btn.addEventListener('click', () => socket.emit(btn.dataset.action, btn.dataset.id));
+    });
 
-function createPeerConnection(userId, isInitiator) {
-    const pc = new RTCPeerConnection(configuration);
-    if (localStream) localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-    pc.onicecandidate = e => { if (e.candidate) socket.emit('signal', userId, { ice: e.candidate }); };
-    pc.ontrack = e => addRemoteVideo(userId, e.streams[0]);
-    if (isInitiator) { pc.createOffer().then(offer => { pc.setLocalDescription(offer); socket.emit('signal', userId, { sdp: offer }); }); }
-    return pc;
-}
-
-function addRemoteVideo(userId, stream) {
-    if (document.getElementById(`camera-${userId}`)) return;
-    const isCamActive = currentUsers[userId] && currentUsers[userId].isCamOn;
-    const box = document.createElement('div'); 
-    box.className = isCamActive ? 'camera-box' : 'camera-box hidden'; 
-    box.id = `camera-${userId}`;
-    
-    box.style.left = `${Math.random() * 50 + 170}px`; box.style.top = '10px';
-    const vid = document.createElement('video'); vid.className = 'remote-video'; vid.autoplay = true; vid.playsInline = true; vid.srcObject = stream;
-    if (locallyMutedUsers.has(userId)) vid.muted = true;
-    box.appendChild(vid); cameraBoxesContainer.appendChild(box);
-    setTimeout(manageScreenshareView, 100);
-}
-
-socket.on('user-left', (userId) => {
-    if (peers[userId]) { peers[userId].close(); delete peers[userId]; }
-    const box = document.getElementById(`camera-${userId}`); if (box) box.remove();
-    locallyMutedUsers.delete(userId);
     manageScreenshareView();
 });
 
-// Not: Medya artık sayfa açılır açılmaz değil, odaya girerken isteniyor (bkz. join-form).
+// Yeni gelen kişiye mevcut medyamızı hemen gönder
+socket.on('user-joined', (userId) => { getPeer(userId); });
+
+socket.on('user-left', (userId) => {
+    if (peers[userId]) { peers[userId].pc.close(); delete peers[userId]; }
+    const box = document.getElementById(`camera-${userId}`); if (box) box.remove();
+    delete remoteMedia[userId];
+    locallyMutedUsers.delete(userId);
+    manageScreenshareView();
+});
 
 // --- TAM EKRAN MANTIĞI ---
 if (fullscreenBtn) {
@@ -866,14 +950,10 @@ socket.on("hostChanged", (newHostId) => {
 });
 
 socket.on("forceMute", () => {
-    if (isMicOn) {
-        document.getElementById("toggle-mic-btn").click();
-    }
+    if (isMicOn) { setMic(false); toast('Yönetici mikrofonunu kapattı.'); }
 });
 
 socket.on("forceCamOff", () => {
-    if (isCamOn) {
-        document.getElementById("toggle-cam-btn").click();
-    }
+    if (isCamOn) { setCam(false); toast('Yönetici kameranı kapattı.'); }
 });
 
