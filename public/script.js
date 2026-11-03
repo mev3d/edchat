@@ -406,11 +406,25 @@ function mediaErrorMessage(err, what) {
         case 'NotAllowedError': case 'PermissionDeniedError':
             return `${what} izni verilmedi. Adres çubuğundaki simgeden izin verip tekrar dene.`;
         case 'NotReadableError': case 'TrackStartError':
-            return `${what} başka bir uygulama veya sekme tarafından kullanılıyor. Onu kapatıp tekrar dene.`;
+            return `${what} başlatılamadı; başka bir uygulama (Zoom, Teams, Discord, Kamera uygulaması vb.) kullanıyor olabilir. Onu kapatıp tekrar dene.`;
         case 'NotFoundError': case 'DevicesNotFoundError': case 'OverconstrainedError':
             return `Bu cihazda ${what.toLowerCase()} bulunamadı.`;
         default:
             return `${what} açılamadı${err && err.message ? ': ' + err.message : '.'}`;
+    }
+}
+
+// Bazı (özellikle Windows) kamera sürücüleri belirli çözünürlükte açılamayınca "cihaz kullanılıyor"
+// (NotReadableError) hatası verir. Önce tercih edilen ayarlarla dene, olmazsa kısa bir bekleme
+// sonrası hiçbir kısıt olmadan tekrar dene.
+async function openDevice(kind, preferred) {
+    try {
+        return await navigator.mediaDevices.getUserMedia({ [kind]: preferred });
+    } catch (err) {
+        if (!['NotReadableError', 'TrackStartError', 'OverconstrainedError', 'AbortError'].includes(err && err.name)) throw err;
+        console.warn(`${kind} tercih edilen ayarlarla açılamadı, varsayılanla deneniyor:`, err);
+        await new Promise(r => setTimeout(r, 400));
+        return await navigator.mediaDevices.getUserMedia({ [kind]: true });
     }
 }
 
@@ -572,7 +586,7 @@ async function setMic(on) {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return toast('Tarayıcın mikrofonu desteklemiyor.', 'error');
         pending.mic = true; refreshLocalUI();
         try {
-            const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+            const s = await openDevice('audio', { echoCancellation: true, noiseSuppression: true, autoGainControl: true });
             local.mic = s.getAudioTracks()[0];
             camStream.addTrack(local.mic);
             local.mic.onended = () => { removeTrackFromAll(local.mic); camStream.removeTrack(local.mic); local.mic = null; isMicOn = false; emitMediaState(); refreshLocalUI(); };
@@ -594,7 +608,7 @@ async function setCam(on) {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return toast('Tarayıcın kamerayı desteklemiyor.', 'error');
         pending.cam = true; refreshLocalUI();
         try {
-            const s = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24 } } });
+            const s = await openDevice('video', { width: { ideal: 640 }, height: { ideal: 360 } });
             local.cam = s.getVideoTracks()[0];
             camStream.addTrack(local.cam);
             local.cam.onended = () => setCam(false);
