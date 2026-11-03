@@ -245,23 +245,30 @@ button, input { font: inherit; color: inherit; }
     100% { transform: translateY(-220px) scale(1); opacity: 0; }
 }
 
-/* Sohbet balonu (mobil) */
-.chat-bubble-btn { position: fixed; right: 20px; bottom: calc(84px + env(safe-area-inset-bottom, 0px)); z-index: 1900; width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; border: none; border-radius: 50%; background: var(--accent); color: var(--on-accent); font-size: 22px; cursor: pointer; box-shadow: 0 8px 24px rgba(0, 206, 209, .35); transition: .3s; touch-action: none; }
+/* Sürüklenebilir sohbet balonu — konumu JS (left/top) ile verilir */
+.chat-bubble-btn { position: fixed; right: 20px; bottom: 84px; z-index: 1900; width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; border: none; border-radius: 50%; background: var(--accent); color: var(--on-accent); font-size: 22px; cursor: grab; box-shadow: 0 8px 24px rgba(0, 206, 209, .35); transition: background .2s, transform .2s, box-shadow .2s; touch-action: none; user-select: none; -webkit-user-select: none; }
 .chat-bubble-btn:hover { background: var(--accent-hover); }
+.chat-bubble-btn.dragging { cursor: grabbing; transform: scale(1.1); box-shadow: 0 14px 34px rgba(0, 206, 209, .5); }
+.chat-bubble-btn.snapping { transition: left .3s var(--ease), top .3s var(--ease), background .2s, transform .2s; }
+.chat-bubble-btn.ping { animation: ping .5s var(--ease); }
+@keyframes ping { 0%, 100% { transform: scale(1); } 40% { transform: scale(1.22); } }
+body:has(.chat-floating:not(.chat-closed)) .chat-bubble-btn i::before { content: "\f00d"; } /* açıkken X ikonu */
 .unread-badge { position: absolute; top: -4px; right: -4px; min-width: 22px; height: 22px; padding: 0 6px; display: flex; align-items: center; justify-content: center; border-radius: var(--r-full); background: var(--danger); color: #fff; font-size: 11px; font-weight: 700; border: 2px solid var(--bg); }
 
-/* Masaüstü: sohbet sağda sabit sütun */
+/* Yüzen sohbet kartı — balonun yanında açılır, konumu ve boyu JS ile hesaplanır */
+.chat-floating { position: fixed; right: 12px; bottom: 150px; width: min(360px, calc(100% - 24px)); height: min(520px, 62vh); border: 1px solid var(--line-strong); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); overflow: hidden; transform-origin: var(--origin, bottom right); transition: opacity .2s var(--ease), transform .2s var(--ease); }
+.chat-floating.chat-closed { opacity: 0; transform: scale(.9); pointer-events: none; }
+.chat-header-actions { display: flex; gap: 2px; }
+
+/* Masaüstü: isteğe bağlı sağa sabitleme */
 @media (min-width: 901px) {
-    .chat-bubble-btn { display: none; }
-    .chat-floating { position: static !important; width: var(--chat-w); flex-shrink: 0; border-left: 1px solid var(--line); }
-    .chat-floating.chat-closed { display: none; }
-    #chat-close-btn { display: none; }
+    body.chat-docked .chat-bubble-btn { display: none; }
+    body.chat-docked .chat-floating { position: static; width: var(--chat-w) !important; height: auto; flex-shrink: 0; border: none; border-left: 1px solid var(--line); border-radius: 0; box-shadow: none; transform: none; transition: none; }
+    body.chat-docked .chat-floating.chat-closed { display: none; }
+    body.chat-docked #chat-dock-btn { color: var(--accent); }
 }
-/* Mobil: sohbet yüzen kart */
 @media (max-width: 900px) {
     .desktop-only { display: none !important; }
-    .chat-floating { position: fixed; right: 12px; bottom: calc(150px + env(safe-area-inset-bottom, 0px)); width: min(380px, calc(100% - 24px)); height: 62vh; height: 62dvh; max-height: 520px; border: 1px solid var(--line-strong); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); overflow: hidden; transition: opacity .25s, transform .25s; }
-    .chat-floating.chat-closed { opacity: 0; transform: translateY(16px); pointer-events: none; }
 }
 
 /* Bildirim */

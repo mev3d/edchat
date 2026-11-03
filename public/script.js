@@ -44,7 +44,11 @@ function setUnread(n) {
     unreadCount = n;
     [unreadBadge, unreadBadgeDesktop].forEach(b => { b.innerText = n; b.classList.toggle('hidden', !n); });
 }
-function openChat() { chatPanel.classList.remove('chat-closed'); chatHeaderBtn.classList.add('active'); setUnread(0); chatMessages.scrollTop = chatMessages.scrollHeight; }
+function openChat() {
+    if (typeof placeChatPanel === 'function') placeChatPanel();
+    chatPanel.classList.remove('chat-closed'); chatHeaderBtn.classList.add('active'); setUnread(0); chatMessages.scrollTop = chatMessages.scrollHeight;
+    if (window.innerWidth > 900) msgInput.focus();
+}
 function closeChat() { chatPanel.classList.add('chat-closed'); chatHeaderBtn.classList.remove('active'); }
 chatToggleBtn.addEventListener('click', (e) => {
     if (dragHasMovedChat) return;
@@ -107,8 +111,7 @@ function appendMessage(data, fromHistory) {
     if (nearBottom || mine || fromHistory) chatMessages.scrollTop = chatMessages.scrollHeight;
 
     if (!fromHistory && !mine && chatPanel.classList.contains('chat-closed')) {
-        chatToggleBtn.style.transform = 'scale(1.2)';
-        setTimeout(() => chatToggleBtn.style.transform = 'scale(1)', 200);
+        chatToggleBtn.classList.remove('ping'); void chatToggleBtn.offsetWidth; chatToggleBtn.classList.add('ping');
         setUnread(unreadCount + 1);
     }
 }
@@ -144,7 +147,8 @@ document.getElementById('join-form').addEventListener('submit', async (e) => {
             passwordScreen.classList.add('hidden'); mainScreen.classList.remove('hidden');
             renderEmptyChat();
             if (response.messages) response.messages.forEach(msg => appendMessage(msg, true));
-            if (window.innerWidth > 900) openChat();
+            placeBubble(false);
+            if (isDocked()) openChat();
             handleOrientationChange();
             if (player && player.loadVideoById) {
                 isUserAction = false;
@@ -713,78 +717,99 @@ function stopDrag() {
 document.addEventListener('mousedown', startDrag); document.addEventListener('mousemove', drag); document.addEventListener('mouseup', stopDrag);
 document.addEventListener('touchstart', startDrag, {passive: false}); document.addEventListener('touchmove', drag, {passive: false}); document.addEventListener('touchend', stopDrag);
 
-// --- DRAGGABLE CHAT BUBBLE ---
-let isDraggingChat = false;
-let dragStartX = 0;
-let dragStartY = 0;
-let currentRight = 20; 
-let currentBottom = 75;
+// --- SÜRÜKLENEBİLİR SOHBET BALONU ---
+// Balon ekranın her yerine sürüklenir, bırakınca en yakın kenara yapışır ve konumu hatırlanır.
+// Sohbet paneli her zaman balonun yanında, ekrana sığacak şekilde açılır.
+const BUBBLE = 56, EDGE = 12, GAP = 10;
+const clamp = (v, min, max) => Math.min(Math.max(v, min), Math.max(min, max));
+let bubbleState = { side: 'right', yr: null }; // yr: dikey konum (0 = üst, 1 = alt)
+try { const saved = JSON.parse(localStorage.getItem('lesa_bubble')); if (saved && (saved.side === 'left' || saved.side === 'right')) bubbleState = saved; } catch (e) {}
 
-chatToggleBtn.addEventListener("mousedown", startDragChat);
-chatToggleBtn.addEventListener("touchstart", startDragChat, {passive: false});
+function isDocked() { return document.body.classList.contains('chat-docked') && window.innerWidth > 900; }
 
-function startDragChat(e) {
-    if (e.target.closest("#chat-toggle-btn") !== chatToggleBtn) return;
-    isDraggingChat = true;
-    dragHasMovedChat = false;
-    dragStartX = e.type.includes("mouse") ? e.clientX : e.touches[0].clientX;
-    dragStartY = e.type.includes("mouse") ? e.clientY : e.touches[0].clientY;
-    
-    const rect = chatToggleBtn.getBoundingClientRect();
-    currentRight = window.innerWidth - rect.right;
-    currentBottom = window.innerHeight - rect.bottom;
-    chatToggleBtn.style.transition = 'none'; // REMOVE TRANSITION FOR SMOOTH DRAG
-    
-    document.addEventListener("mousemove", dragChat);
-    document.addEventListener("touchmove", dragChat, {passive: false});
-    document.addEventListener("mouseup", endDragChat);
-    document.addEventListener("touchend", endDragChat);
+function bubbleXY() {
+    const maxY = window.innerHeight - BUBBLE - EDGE;
+    const y = bubbleState.yr == null ? window.innerHeight - BUBBLE - 84 : bubbleState.yr * (window.innerHeight - BUBBLE);
+    return { x: bubbleState.side === 'left' ? EDGE : window.innerWidth - BUBBLE - EDGE, y: clamp(y, EDGE, maxY) };
 }
 
-function dragChat(e) {
-    if (!isDraggingChat) return;
-    const clientX = e.type.includes("mouse") ? e.clientX : e.touches[0].clientX;
-    const clientY = e.type.includes("mouse") ? e.clientY : e.touches[0].clientY;
-    
-    const deltaX = dragStartX - clientX;
-    const deltaY = dragStartY - clientY;
-    
-    if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3) {
-        dragHasMovedChat = true;
-        if(e.cancelable) e.preventDefault();
-    }
-    
-    dragStartX = clientX;
-    dragStartY = clientY;
-    
-    currentRight += deltaX;
-    currentBottom += deltaY;
-    
-    currentRight = Math.max(10, Math.min(window.innerWidth - 70, currentRight));
-    currentBottom = Math.max(10, Math.min(window.innerHeight - 70, currentBottom));
-    
-    chatToggleBtn.style.right = `${currentRight}px`;
-    chatToggleBtn.style.bottom = `${currentBottom}px`;
-    
-    chatPanel.style.bottom = `${currentBottom + 70}px`;
-    if (currentRight > window.innerWidth / 2) {
-        const leftPos = window.innerWidth - currentRight - 60;
-        chatPanel.style.right = "auto";
-        chatPanel.style.left = `${Math.max(10, leftPos)}px`;
-    } else {
-        chatPanel.style.left = "auto";
-        chatPanel.style.right = `${currentRight}px`;
-    }
+function placeBubble(animate) {
+    const p = bubbleXY();
+    chatToggleBtn.classList.toggle('snapping', !!animate);
+    Object.assign(chatToggleBtn.style, { left: p.x + 'px', top: p.y + 'px', right: 'auto', bottom: 'auto' });
+    placeChatPanel();
 }
 
-function endDragChat() {
-    isDraggingChat = false;
-    chatToggleBtn.style.transition = '0.3s'; // RESTORE TRANSITION
-    document.removeEventListener("mousemove", dragChat);
-    document.removeEventListener("touchmove", dragChat);
-    document.removeEventListener("mouseup", endDragChat);
-    document.removeEventListener("touchend", endDragChat);
+function placeChatPanel() {
+    if (isDocked()) { ['left', 'top', 'right', 'bottom', 'height'].forEach(k => chatPanel.style.removeProperty(k)); return; }
+    const bx = parseFloat(chatToggleBtn.style.left), by = parseFloat(chatToggleBtn.style.top);
+    if (isNaN(bx)) return;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const w = Math.min(360, vw - 2 * EDGE);
+    const preferredH = Math.min(520, vh * 0.62);
+    const spaceAbove = by - GAP - EDGE, spaceBelow = vh - (by + BUBBLE) - GAP - EDGE;
+    const above = spaceAbove >= spaceBelow;
+    const h = Math.max(240, Math.min(preferredH, above ? spaceAbove : spaceBelow));
+    const onLeft = bx + BUBBLE / 2 < vw / 2;
+    const left = clamp(onLeft ? bx : bx + BUBBLE - w, EDGE, vw - w - EDGE);
+    const top = clamp(above ? by - GAP - h : by + BUBBLE + GAP, EDGE, vh - h - EDGE);
+    Object.assign(chatPanel.style, { width: w + 'px', height: h + 'px', left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
+    chatPanel.style.setProperty('--origin', `${above ? 'bottom' : 'top'} ${onLeft ? 'left' : 'right'}`);
 }
+
+let chatDrag = null;
+chatToggleBtn.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    chatDrag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, ox: parseFloat(chatToggleBtn.style.left), oy: parseFloat(chatToggleBtn.style.top), moved: false };
+    chatToggleBtn.setPointerCapture(e.pointerId);
+});
+chatToggleBtn.addEventListener('pointermove', (e) => {
+    if (!chatDrag || e.pointerId !== chatDrag.id) return;
+    const dx = e.clientX - chatDrag.sx, dy = e.clientY - chatDrag.sy;
+    if (!chatDrag.moved && Math.hypot(dx, dy) < 6) return; // küçük titremeler tıklama sayılır
+    chatDrag.moved = true;
+    chatToggleBtn.classList.add('dragging'); chatToggleBtn.classList.remove('snapping');
+    const x = clamp(chatDrag.ox + dx, EDGE, window.innerWidth - BUBBLE - EDGE);
+    const y = clamp(chatDrag.oy + dy, EDGE, window.innerHeight - BUBBLE - EDGE);
+    chatToggleBtn.style.left = x + 'px'; chatToggleBtn.style.top = y + 'px';
+    placeChatPanel(); // açıksa panel balonu canlı takip eder
+});
+function endChatDrag(e) {
+    if (!chatDrag || e.pointerId !== chatDrag.id) return;
+    const moved = chatDrag.moved; chatDrag = null;
+    chatToggleBtn.classList.remove('dragging');
+    if (!moved) return;
+    const x = parseFloat(chatToggleBtn.style.left), y = parseFloat(chatToggleBtn.style.top);
+    bubbleState = { side: x + BUBBLE / 2 < window.innerWidth / 2 ? 'left' : 'right', yr: y / (window.innerHeight - BUBBLE) };
+    try { localStorage.setItem('lesa_bubble', JSON.stringify(bubbleState)); } catch (err) {}
+    placeBubble(true);
+    dragHasMovedChat = true; setTimeout(() => { dragHasMovedChat = false; }, 0); // sürükleme sonrası tıklamayı yut
+}
+chatToggleBtn.addEventListener('pointerup', endChatDrag);
+chatToggleBtn.addEventListener('pointercancel', endChatDrag);
+// Çift tıklama: balonu varsayılan yerine (sağ alt) döndür
+chatToggleBtn.addEventListener('dblclick', () => {
+    bubbleState = { side: 'right', yr: null };
+    try { localStorage.removeItem('lesa_bubble'); } catch (err) {}
+    placeBubble(true);
+});
+window.addEventListener('resize', () => placeBubble(false));
+
+// Masaüstünde sohbeti sağa sabitleme (isteğe bağlı, hatırlanır)
+const chatDockBtn = document.getElementById('chat-dock-btn');
+function setDocked(on) {
+    document.body.classList.toggle('chat-docked', on);
+    try { localStorage.setItem('lesa_chat_docked', on ? '1' : '0'); } catch (e) {}
+    chatDockBtn.innerHTML = `<i class="fas ${on ? 'fa-up-right-from-square' : 'fa-table-columns'}"></i>`;
+    chatDockBtn.title = on ? 'Yüzen pencere yap' : 'Sağa sabitle';
+    placeBubble(false);
+}
+chatDockBtn.addEventListener('click', () => setDocked(!document.body.classList.contains('chat-docked')));
+try { setDocked(localStorage.getItem('lesa_chat_docked') === '1'); } catch (e) { setDocked(false); }
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !chatPanel.classList.contains('chat-closed') && !isDocked()) closeChat();
+});
 
 
 // --- REACTIONS ---
