@@ -210,8 +210,11 @@ socket.on('message', msg => appendMessage(msg, false));
 
 // YOUTUBE KONTROLLERİ
 function onYouTubeIframeAPIReady() {
+    if (player) return;
     player = new YT.Player('player', { height: '100%', width: '100%', videoId: '', playerVars: { 'autoplay': 0, 'controls': 0, 'disablekb': 1, 'rel': 0, 'modestbranding': 1 }, events: { 'onStateChange': onPlayerStateChange, 'onReady': onPlayerReady } });
 }
+// YouTube API bu dosyadan önce hazır olduysa geri çağrı hiç gelmez; oynatıcıyı kendimiz kuralım
+if (window.YT && window.YT.Player) onYouTubeIframeAPIReady();
 
 let uiInterval;
 function onPlayerReady(event) {

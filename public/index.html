@@ -61,6 +61,7 @@
             </form>
 
             <div class="header-controls">
+                <button id="pomo-toggle-btn" class="icon-btn soft pomo-toggle" title="Pomodoro sayacı"><i class="fas fa-stopwatch"></i><span id="pomo-toggle-time" class="hidden">25:00</span></button>
                 <div class="media-wrapper">
                     <div class="tool-group" role="group" aria-label="Medya">
                         <button id="toggle-mic-btn" class="control-btn muted" title="Mikrofon"><i class="fas fa-microphone-slash"></i></button>
@@ -116,6 +117,32 @@
                 </div>
             </div>
 
+            <!-- Pomodoro sayacı: sürüklenebilir, yarı saydam; videoyu durdurmaz -->
+            <div id="pomo-widget" class="pomo hidden" role="dialog" aria-label="Pomodoro sayacı">
+                <div class="pomo-top">
+                    <span class="pomo-mode" id="pomo-mode"><i class="fas fa-fire"></i><span>ODAK</span></span>
+                    <div class="pomo-top-actions">
+                        <button class="pomo-icon" id="pomo-settings-btn" title="Süre ve ayarlar"><i class="fas fa-sliders"></i></button>
+                        <button class="pomo-icon" id="pomo-compact-btn" title="Küçült"><i class="fas fa-compress"></i></button>
+                        <button class="pomo-icon" id="pomo-close-btn" title="Gizle (sayaç çalışmaya devam eder)"><i class="fas fa-times"></i></button>
+                    </div>
+                </div>
+                <div class="pomo-face">
+                    <svg class="pomo-ring" viewBox="0 0 120 120" aria-hidden="true"><circle class="pomo-ring-bg" cx="60" cy="60" r="54"/><circle class="pomo-ring-fg" id="pomo-ring" cx="60" cy="60" r="54"/></svg>
+                    <div class="pomo-center">
+                        <div class="pomo-time" id="pomo-time">25:00</div>
+                        <div class="pomo-status" id="pomo-status">Hazırsan başlayalım!</div>
+                    </div>
+                </div>
+                <div class="pomo-controls">
+                    <button class="pomo-ctl" id="pomo-reset-btn" title="Sıfırla (sıfırdayken turları da sıfırlar)"><i class="fas fa-rotate-left"></i></button>
+                    <button class="pomo-play" id="pomo-play-btn" title="Başlat"><i class="fas fa-play"></i><span>Başlat</span></button>
+                    <button class="pomo-ctl" id="pomo-skip-btn" title="Sonraki aşamaya geç"><i class="fas fa-forward-step"></i></button>
+                </div>
+                <div class="pomo-foot"><div class="pomo-dots" id="pomo-dots"></div><span class="pomo-meta" id="pomo-meta"></span></div>
+                <div class="pomo-panel hidden" id="pomo-panel"></div>
+            </div>
+
             <button id="chat-toggle-btn" class="chat-bubble-btn" title="Sohbet — tıkla: aç/kapat · sürükle: taşı · çift tıkla: köşeye döndür">
                 <i class="fas fa-comment-dots"></i>
                 <span id="unread-badge" class="unread-badge hidden">0</span>
@@ -154,5 +181,6 @@
     <script src="https://www.youtube.com/iframe_api"></script>
     <script src="/socket.io/socket.io.js"></script>
     <script src="script.js"></script>
+    <script src="pomodoro.js"></script>
 </body>
 </html>
