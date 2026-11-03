@@ -10,6 +10,16 @@ const io = new Server(server);
 app.use(express.static(path.join(__dirname, 'public')));
 
 const rooms = {};
+const MAX_MESSAGES = 100;
+
+function pushMessage(roomId, msg) {
+    const room = rooms[roomId];
+    if (!room) return msg;
+    msg.time = Date.now();
+    room.messages.push(msg);
+    if (room.messages.length > MAX_MESSAGES) room.messages.shift();
+    return msg;
+}
 
 io.on('connection', (socket) => {
     
@@ -44,10 +54,7 @@ io.on('connection', (socket) => {
 
         callback({ success: true, videoId: room.videoId, time: currentRealTime, isPlaying: room.isPlaying, messages: room.messages, hostId: room.hostId, myId: socket.id, freeControl: room.freeControl });
 
-        const sysMsg = { user: 'Sistem', text: `${username} odaya katıldı.`, color: '#00CED1' };
-        room.messages.push(sysMsg);
-        if(room.messages.length > 50) room.messages.shift();
-        
+        const sysMsg = pushMessage(roomId, { user: 'Sistem', text: `${username} odaya katıldı.`, color: '#00CED1' });
         io.to(roomId).emit('message', sysMsg);
         socket.to(roomId).emit('user-joined', socket.id, username);
         io.to(roomId).emit('update-users', room.users);
@@ -66,14 +73,16 @@ io.on('connection', (socket) => {
 
     socket.on('chatMessage', (msg) => {
         if (socket.roomId && rooms[socket.roomId]) {
-            const msgData = { user: socket.username, text: msg, color: '#40E0D0' };
-            rooms[socket.roomId].messages.push(msgData);
+            if (typeof msg !== 'string' || !msg.trim()) return;
+            const msgData = pushMessage(socket.roomId, { user: socket.username, text: msg.slice(0, 2000), color: '#40E0D0' });
             io.to(socket.roomId).emit('message', msgData);
         }
     });
 
     socket.on('loadVideo', (videoId) => {
-        if (socket.roomId && rooms[socket.roomId]) {
+        if (typeof videoId !== 'string' || !/^[\w-]{11}$/.test(videoId)) return;
+        const roomId = socket.roomId;
+        if (roomId && rooms[roomId]) {
             if (rooms[socket.roomId].hostId !== socket.id && !rooms[socket.roomId].freeControl) return;
             rooms[socket.roomId].videoId = videoId; rooms[socket.roomId].time = 0;
             rooms[socket.roomId].updatedAt = Date.now(); rooms[socket.roomId].isPlaying = true;
@@ -87,14 +96,12 @@ io.on('connection', (socket) => {
                 res.on('end', () => {
                     let title = '';
                     try { title = JSON.parse(data).title; } catch(e) {}
-                    const sysMsg = { user: 'Sistem', text: `Şu an oynatılıyor: ${title ? title + ' - ' : ''}https://youtu.be/${videoId}`, color: '#ffb703' };
-                    rooms[socket.roomId].messages.push(sysMsg);
-                    io.to(socket.roomId).emit('message', sysMsg);
+                    const sysMsg = pushMessage(roomId, { user: 'Sistem', text: `Şu an oynatılıyor: ${title ? title + ' - ' : ''}https://youtu.be/${videoId}`, color: '#ffb703' });
+                    io.to(roomId).emit('message', sysMsg);
                 });
             }).on('error', () => {
-                const sysMsg = { user: 'Sistem', text: `Şu an oynatılıyor: https://youtu.be/${videoId}`, color: '#ffb703' };
-                rooms[socket.roomId].messages.push(sysMsg);
-                io.to(socket.roomId).emit('message', sysMsg);
+                const sysMsg = pushMessage(roomId, { user: 'Sistem', text: `Şu an oynatılıyor: https://youtu.be/${videoId}`, color: '#ffb703' });
+                io.to(roomId).emit('message', sysMsg);
             });
         }
     });
@@ -123,12 +130,22 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         if (socket.username && socket.roomId && rooms[socket.roomId]) {
-            delete rooms[socket.roomId].users[socket.id];
-            const sysMsg = { user: 'Sistem', text: `${socket.username} ayrıldı.`, color: '#008B8B' };
-            rooms[socket.roomId].messages.push(sysMsg);
+            const room = rooms[socket.roomId];
+            delete room.users[socket.id];
+            const sysMsg = pushMessage(socket.roomId, { user: 'Sistem', text: `${socket.username} ayrıldı.`, color: '#008B8B' });
             socket.to(socket.roomId).emit('message', sysMsg);
             socket.to(socket.roomId).emit('user-left', socket.id);
-            io.to(socket.roomId).emit('update-users', rooms[socket.roomId].users);
+
+            // Yönetici çıktıysa odada kalan ilk kişi yönetici olur
+            const remaining = Object.keys(room.users);
+            if (room.hostId === socket.id && remaining.length) {
+                room.hostId = remaining[0];
+                remaining.forEach(id => { room.users[id].isHost = (id === room.hostId); });
+                io.to(socket.roomId).emit('hostChanged', room.hostId);
+                const hostMsg = pushMessage(socket.roomId, { user: 'Sistem', text: `${room.users[room.hostId].username} artık oda yöneticisi.`, color: '#ffb703' });
+                io.to(socket.roomId).emit('message', hostMsg);
+            }
+            io.to(socket.roomId).emit('update-users', room.users);
         }
     });
     socket.on("toggleFreeControl", () => {

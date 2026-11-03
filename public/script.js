@@ -1,5 +1,19 @@
 const socket = io();
 
+// Yardımcılar
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function toast(msg, type = 'info') {
+    const t = document.createElement('div'); t.className = 'toast ' + type;
+    t.innerHTML = `<i class="fas ${type === 'error' ? 'fa-circle-exclamation' : 'fa-circle-info'}"></i><span></span>`;
+    t.lastChild.textContent = msg; document.getElementById('toast-root').appendChild(t);
+    setTimeout(() => t.classList.add('out'), 2800); setTimeout(() => t.remove(), 3200);
+}
+function setBusy(btn, busy, label) {
+    if (!btn.dataset.label) btn.dataset.label = btn.innerHTML;
+    btn.disabled = busy; btn.innerHTML = busy ? `<i class="fas fa-circle-notch fa-spin"></i> ${label}` : btn.dataset.label;
+}
+let myUsername = '';
+
 // UI Elementleri
 const createScreen = document.getElementById('create-screen');
 const passwordScreen = document.getElementById('password-screen');
@@ -22,66 +36,123 @@ const chatToggleBtn = document.getElementById('chat-toggle-btn');
 const chatCloseBtn = document.getElementById('chat-close-btn');
 const chatPanel = document.getElementById('chat-panel');
 const unreadBadge = document.getElementById('unread-badge');
+const unreadBadgeDesktop = document.getElementById('unread-badge-desktop');
+const chatHeaderBtn = document.getElementById('chat-header-btn');
 let unreadCount = 0;
 let dragHasMovedChat = false;
-chatToggleBtn.addEventListener('click', (e) => { 
+function setUnread(n) {
+    unreadCount = n;
+    [unreadBadge, unreadBadgeDesktop].forEach(b => { b.innerText = n; b.classList.toggle('hidden', !n); });
+}
+function openChat() { chatPanel.classList.remove('chat-closed'); chatHeaderBtn.classList.add('active'); setUnread(0); chatMessages.scrollTop = chatMessages.scrollHeight; }
+function closeChat() { chatPanel.classList.add('chat-closed'); chatHeaderBtn.classList.remove('active'); }
+chatToggleBtn.addEventListener('click', (e) => {
     if (dragHasMovedChat) return;
-    chatPanel.classList.remove('chat-closed'); unreadCount = 0; unreadBadge.classList.add('hidden'); 
+    if (chatPanel.classList.contains('chat-closed')) openChat(); else closeChat();
 });
-chatCloseBtn.addEventListener('click', () => { chatPanel.classList.add('chat-closed'); });
+chatHeaderBtn.addEventListener('click', () => { if (chatPanel.classList.contains('chat-closed')) openChat(); else closeChat(); });
+chatCloseBtn.addEventListener('click', closeChat);
 
 let player; let isUserAction = true; let currentRoomId = null; let myId = null; let currentHostId = null; let isFreeControl = false;
 const urlParams = new URLSearchParams(window.location.search);
 const roomParam = urlParams.get('oda');
-if (roomParam) { currentRoomId = roomParam; passwordScreen.classList.remove('hidden'); } 
-else { createScreen.classList.remove('hidden'); }
+if (roomParam) {
+    currentRoomId = roomParam; passwordScreen.classList.remove('hidden');
+    document.getElementById('room-code-label').textContent = roomParam;
+    try {
+        joinUsername.value = localStorage.getItem('lesa_username') || '';
+        const savedPass = sessionStorage.getItem('lesa_pass_' + roomParam);
+        if (savedPass) joinPassword.value = savedPass;
+    } catch (e) {}
+    (joinUsername.value ? (joinPassword.value ? joinBtn : joinPassword) : joinUsername).focus();
+}
+else { createScreen.classList.remove('hidden'); newRoomPassInput.focus(); }
 
-function appendMessage(data) {
+let lastMsgUser = null;
+function renderEmptyChat() { chatMessages.innerHTML = '<div class="chat-empty"><i class="fas fa-comments"></i>Henüz mesaj yok.<br>Selam ver! 👋</div>'; lastMsgUser = null; }
+function formatClock(t) { return t ? new Date(t).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }) : ''; }
+function linkify(html) { return html.replace(/(\bhttps?:\/\/[^\s<]+)/gi, u => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`); }
+
+function appendMessage(data, fromHistory) {
+    const empty = chatMessages.querySelector('.chat-empty'); if (empty) empty.remove();
     const div = document.createElement('div');
-    div.classList.add('message'); div.style.borderLeftColor = data.color;
+    div.classList.add('message');
+    const text = String(data.text || '');
+    const isSystem = data.user === 'Sistem';
+    const mine = !isSystem && data.user === myUsername;
 
-    let text = data.text;
-    const match = text.match(/(https?:\/\/)?(www\.)?(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?\s]*)/);
-    let playBtnHtml = '';
-    if (match && match[4].length === 11) {
-        playBtnHtml = `<div style="margin-top: 5px;"><button class="outline-btn" style="padding: 2px 8px; font-size:12px; height:auto; display:inline-block;" onclick="socket.emit('loadVideo', '${match[4]}')"><i class="fas fa-play"></i> Oynat</button></div>`;
-        text = text.replace(match[0], `<a href="${match[0].startsWith('http') ? match[0] : 'https://' + match[0]}" target="_blank" style="color:#00CED1; text-decoration:none;">${match[0]}</a>`);
+    const match = text.match(/(?:youtu\.be\/|\/embed\/|watch\?v=|&v=)([\w-]{11})/);
+    const playBtnHtml = match ? `<button type="button" class="play-chip" data-vid="${match[1]}"><i class="fas fa-play"></i> Oynat</button>` : '';
+    const meta = data.time ? `<span class="meta">${formatClock(data.time)}</span>` : '';
+
+    if (isSystem) {
+        div.classList.add('system');
+        if (text.startsWith('Şu an oynatılıyor')) div.classList.add('now-playing');
+        div.innerHTML = `${div.classList.contains('now-playing') ? '<i class="fas fa-play-circle"></i>' : ''}${linkify(esc(text))}${playBtnHtml && !div.classList.contains('now-playing') ? '<br>' + playBtnHtml : ''}`;
+        lastMsgUser = null;
+    } else {
+        if (mine) div.classList.add('mine');
+        if (lastMsgUser === data.user) div.classList.add('grouped');
+        lastMsgUser = data.user;
+        div.innerHTML = `<div class="user">${esc(data.user)}</div><div class="msg-text">${linkify(esc(text))}</div>${playBtnHtml ? '<div>' + playBtnHtml + '</div>' : ''}${meta}`;
     }
+    const chip = div.querySelector('.play-chip');
+    if (chip) chip.addEventListener('click', () => {
+        if (myId !== currentHostId && !isFreeControl) return toast('Videoyu sadece yönetici değiştirebilir.', 'error');
+        socket.emit('loadVideo', chip.dataset.vid);
+    });
 
-    div.innerHTML = `<div class="user" style="color: ${data.color}">${data.user}</div><div>${text}</div>${playBtnHtml}`;
-    chatMessages.appendChild(div); chatMessages.scrollTop = chatMessages.scrollHeight;
-    
-    if (chatPanel.classList.contains('chat-closed')) {
+    const nearBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 120;
+    chatMessages.appendChild(div);
+    if (nearBottom || mine || fromHistory) chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    if (!fromHistory && !mine && chatPanel.classList.contains('chat-closed')) {
         chatToggleBtn.style.transform = 'scale(1.2)';
         setTimeout(() => chatToggleBtn.style.transform = 'scale(1)', 200);
-        unreadCount++; unreadBadge.innerText = unreadCount; unreadBadge.classList.remove('hidden');
+        setUnread(unreadCount + 1);
     }
 }
 
-createBtn.addEventListener('click', () => {
+document.getElementById('create-form').addEventListener('submit', (e) => {
+    e.preventDefault();
     const pass = newRoomPassInput.value.trim();
-    if (!pass) return alert("Şifre belirleyin!");
-    socket.emit('createRoom', pass, (roomId) => { window.location.href = `?oda=${roomId}`; });
+    if (!pass) { toast("Oda için bir şifre belirle.", 'error'); return newRoomPassInput.focus(); }
+    setBusy(createBtn, true, 'Kuruluyor…');
+    socket.emit('createRoom', pass, (roomId) => {
+        try { sessionStorage.setItem('lesa_pass_' + roomId, pass); } catch (err) {}
+        window.location.href = `?oda=${roomId}`;
+    });
 });
 
-joinBtn.addEventListener('click', () => {
+document.getElementById('join-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
     const username = joinUsername.value.trim(); const password = joinPassword.value.trim();
-    if (!username || !password) return alert("Kullanıcı adı ve şifre zorunludur!");
+    if (!username) { toast("Bir kullanıcı adı yaz.", 'error'); return joinUsername.focus(); }
+    if (!password) { toast("Oda şifresini yaz.", 'error'); return joinPassword.focus(); }
+    setBusy(joinBtn, true, 'Bağlanıyor…');
+    // Bağlantılar kurulmadan önce medya hazır olmalı (kamera/mikrofon kapalı başlar)
+    // İzin penceresi cevapsız kalırsa girişi sonsuza kadar bekletme
+    await Promise.race([getMediaStream(true), new Promise(r => setTimeout(r, 10000))]);
     socket.emit('joinRoom', { roomId: currentRoomId, password, username }, (response) => {
+        setBusy(joinBtn, false);
         if (response.success) {
+            myUsername = username;
+            try { localStorage.setItem('lesa_username', username); sessionStorage.setItem('lesa_pass_' + currentRoomId, password); } catch (err) {}
             myId = response.myId; currentHostId = response.hostId; isFreeControl = response.freeControl;
             updateVideoControlsUI();
-            
+
             passwordScreen.classList.add('hidden'); mainScreen.classList.remove('hidden');
-            chatMessages.innerHTML = ''; 
-            if (response.messages) response.messages.forEach(msg => appendMessage(msg));
+            renderEmptyChat();
+            if (response.messages) response.messages.forEach(msg => appendMessage(msg, true));
+            if (window.innerWidth > 900) openChat();
+            handleOrientationChange();
             if (player && player.loadVideoById) {
                 isUserAction = false;
                 if (response.isPlaying) player.loadVideoById(response.videoId, response.time);
                 else player.cueVideoById(response.videoId, response.time);
                 setTimeout(() => isUserAction = true, 1000);
             }
-        } else alert(response.message);
+        } else { toast(response.message, 'error'); if (response.message === 'Hatalı şifre!') joinPassword.select(); }
     });
 });
 
@@ -92,11 +163,11 @@ function updateVideoControlsUI() {
         if (isHost) {
             roomControlBtn.classList.remove('hidden');
             if (isFreeControl) {
-                roomControlBtn.innerHTML = '<i class="fas fa-unlock"></i> Herkes Açabilir';
-                roomControlBtn.style.color = '#00CED1'; roomControlBtn.style.borderColor = '#00CED1';
+                roomControlBtn.innerHTML = '<i class="fas fa-unlock"></i> Video kontrolü: Herkes';
+                roomControlBtn.className = 'room-control free';
             } else {
-                roomControlBtn.innerHTML = '<i class="fas fa-lock"></i> Sadece Yönetici';
-                roomControlBtn.style.color = '#ffb703'; roomControlBtn.style.borderColor = '#ffb703';
+                roomControlBtn.innerHTML = '<i class="fas fa-lock"></i> Video kontrolü: Sadece yönetici';
+                roomControlBtn.className = 'room-control locked';
             }
         } else {
             roomControlBtn.classList.add('hidden');
@@ -105,7 +176,7 @@ function updateVideoControlsUI() {
 
     const hasControl = (isHost || isFreeControl);
     const urlInput = document.getElementById('youtube-url');
-    if (urlInput) urlInput.disabled = !hasControl;
+    if (urlInput) { urlInput.disabled = !hasControl; urlInput.placeholder = hasControl ? 'YouTube linki yapıştır…' : 'Videoyu sadece yönetici değiştirebilir'; }
     const loadBtn = document.getElementById('load-btn');
     if (loadBtn) loadBtn.disabled = !hasControl;
     const playBtn = document.getElementById('custom-play-btn');
@@ -116,17 +187,22 @@ function updateVideoControlsUI() {
     if (overlay) overlay.style.pointerEvents = hasControl ? 'auto' : 'none';
 }
 
-copyLinkBtn.addEventListener('click', () => {
-    navigator.clipboard.writeText(window.location.href); copyLinkBtn.innerHTML = "Kopyalandı!";
-    setTimeout(() => { copyLinkBtn.innerHTML = '<span class="hide-mobile">Davet Linki</span><i class="fas fa-link show-mobile-inline"></i>'; }, 2000);
+copyLinkBtn.addEventListener('click', async () => {
+    const link = window.location.href;
+    try { await navigator.clipboard.writeText(link); }
+    catch (e) { const ta = document.createElement('textarea'); ta.value = link; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+    copyLinkBtn.classList.add('copied'); copyLinkBtn.innerHTML = '<i class="fas fa-check"></i><span class="hide-mobile">Kopyalandı</span>';
+    toast('Davet linki kopyalandı. Şifreyi de paylaşmayı unutma!');
+    setTimeout(() => { copyLinkBtn.classList.remove('copied'); copyLinkBtn.innerHTML = '<i class="fas fa-link"></i><span class="hide-mobile">Davet Linki</span>'; }, 2000);
 });
 
 sendBtn.addEventListener('click', () => {
     const msg = msgInput.value.trim();
     if (msg) { socket.emit('chatMessage', msg); msgInput.value = ''; }
+    msgInput.focus();
 });
-msgInput.addEventListener('keypress', e => e.key === 'Enter' && sendBtn.click());
-socket.on('message', appendMessage);
+msgInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); sendBtn.click(); } });
+socket.on('message', msg => appendMessage(msg, false));
 
 // YOUTUBE KONTROLLERİ
 function onYouTubeIframeAPIReady() {
@@ -149,10 +225,11 @@ function onPlayerStateChange(event) {
         if (isUserAction) socket.emit('pauseVideo', player.getCurrentTime());
     }
 }
-loadBtn.addEventListener('click', () => {
-    const url = ytUrlInput.value; const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/);
-    const videoId = (match && match[2].length === 11) ? match[2] : null;
-    if (videoId) { socket.emit('loadVideo', videoId); ytUrlInput.value = ''; } else alert("Geçerli bir YouTube linki girin!");
+document.getElementById('yt-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const url = ytUrlInput.value.trim(); const match = url.match(/(?:youtu\.be\/|\/embed\/|\/shorts\/|\/live\/|[?&]v=)([\w-]{11})/);
+    const videoId = match ? match[1] : (/^[\w-]{11}$/.test(url) ? url : null);
+    if (videoId) { socket.emit('loadVideo', videoId); ytUrlInput.value = ''; ytUrlInput.blur(); } else { toast("Geçerli bir YouTube linki yapıştır.", 'error'); ytUrlInput.select(); }
 });
 socket.on('videoChange', (videoId) => { if(player && player.loadVideoById) { isUserAction = false; player.loadVideoById(videoId); setTimeout(() => isUserAction = true, 1000); } });
 socket.on('videoPlay', (time) => { if(player && player.playVideo) { isUserAction = false; if (Math.abs(player.getCurrentTime() - time) > 2) player.seekTo(time); player.playVideo(); setTimeout(() => isUserAction = true, 500); } });
@@ -290,6 +367,9 @@ const participantsDropdown = document.getElementById('participants-dropdown');
 const participantsList = document.getElementById('participants-list');
 const userCountSpan = document.getElementById('user-count');
 
+// Mobil tarayıcılar ekran paylaşımını desteklemiyor; düğmeyi hiç gösterme
+if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) toggleScreenBtn.classList.add('hidden');
+
 let localStream = null; let screenStream = null;
 let isMicOn = false; let isCamOn = false; let isScreenSharing = false;
 let currentUsers = {}; 
@@ -298,8 +378,9 @@ const configuration = { 'iceServers': [{'urls': 'stun:stun.l.google.com:19302'}]
 
 let mediaRequested = false;
 
-async function getMediaStream() {
+async function getMediaStream(silent) {
     if (mediaRequested) return true;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { if (!silent) toast('Tarayıcın kamera/mikrofonu desteklemiyor.', 'error'); return false; }
     try {
         localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         localStream.getAudioTracks()[0].enabled = false; localStream.getVideoTracks()[0].enabled = false;
@@ -316,7 +397,7 @@ async function getMediaStream() {
         return true;
     } catch (err) { 
         console.error("Medya cihazlarına erişilemedi:", err); 
-        alert("Kamera veya mikrofona erişilemedi. Lütfen tarayıcı izinlerinizi kontrol edin.");
+        toast(silent ? "Kamera/mikrofon izni yok; sadece izleyip yazabilirsin." : "Kamera veya mikrofona erişilemedi. Tarayıcı izinlerini kontrol et.", 'error');
         return false; 
     }
 }
@@ -375,7 +456,7 @@ toggleMicBtn.addEventListener('click', async () => {
 });
 
 toggleCamBtn.addEventListener('click', async () => {
-    if (isScreenSharing) return alert("Ekran paylaşımı açıkken kamera açılamaz!");
+    if (isScreenSharing) return toast("Ekran paylaşımı açıkken kamera açılamaz.", 'error');
     const success = await getMediaStream();
     if (!success) return;
     isCamOn = !isCamOn;
@@ -475,7 +556,8 @@ socket.on('update-users', (usersMap) => {
             }
             actionsHtml += `</div>`;
         }
-        li.innerHTML = `<div class="participant-header"><span>${user.isHost ? '👑 ' : ''}${user.username} ${isMe ? '(Sen)' : ''}</span></div>${actionsHtml}`;
+        const media = `<span class="p-media"><i class="fas ${user.isMicOn ? 'fa-microphone on' : 'fa-microphone-slash'}"></i><i class="fas ${user.isScreenSharing ? 'fa-desktop on' : (user.isCamOn ? 'fa-video on' : 'fa-video-slash')}"></i></span>`;
+        li.innerHTML = `<div class="participant-header"><span class="p-avatar">${esc([...String(user.username)][0] || '?')}</span><span class="p-name">${esc(user.username)}${isMe ? '<small>(sen)</small>' : ''}</span>${user.isHost ? '<i class="fas fa-crown p-host" title="Yönetici"></i>' : ''}${media}</div>${actionsHtml}`;
         participantsList.appendChild(li);
 
         if (!isMe) {
@@ -561,7 +643,7 @@ socket.on('user-left', (userId) => {
     manageScreenshareView();
 });
 
-window.addEventListener('load', getMediaStream);
+// Not: Medya artık sayfa açılır açılmaz değil, odaya girerken isteniyor (bkz. join-form).
 
 // --- TAM EKRAN MANTIĞI ---
 if (fullscreenBtn) {
@@ -579,24 +661,21 @@ if (fullscreenBtn) {
 const headerToggleBtn = document.getElementById('header-toggle-btn');
 const mainHeader = document.getElementById('main-header');
 
+// Header gizliyken üstte görünen sekme header'ı geri açar; header içindeki ok onu gizler.
 headerToggleBtn.addEventListener('click', () => {
     mainHeader.classList.toggle('collapsed');
-    if (mainHeader.classList.contains('collapsed')) {
-        headerToggleBtn.innerHTML = '<i class="fas fa-chevron-down"></i>';
-        if (window.innerWidth <= 768) chatPanel.classList.add('chat-closed');
-    } else {
-        headerToggleBtn.innerHTML = '<i class="fas fa-chevron-up"></i>';
-    }
+    if (mainHeader.classList.contains('collapsed') && window.innerWidth <= 768) closeChat();
 });
+document.getElementById('header-hide-btn').addEventListener('click', () => headerToggleBtn.click());
 
 function handleOrientationChange() {
     const isLandscape = window.innerWidth > window.innerHeight;
-    const isMobile = window.innerWidth <= 950; 
+    const isMobile = Math.min(window.innerWidth, window.innerHeight) <= 500;
     if (isLandscape && isMobile) {
-        if (!mainHeader.classList.contains('collapsed')) { mainHeader.classList.add('collapsed'); headerToggleBtn.innerHTML = '<i class="fas fa-chevron-down"></i>'; }
-        if (!chatPanel.classList.contains('chat-closed')) chatPanel.classList.add('chat-closed');
+        mainHeader.classList.add('collapsed');
+        closeChat();
     } else if (!isLandscape && isMobile) {
-        if (mainHeader.classList.contains('collapsed')) { mainHeader.classList.remove('collapsed'); headerToggleBtn.innerHTML = '<i class="fas fa-chevron-up"></i>'; }
+        mainHeader.classList.remove('collapsed');
     }
 }
 window.addEventListener('resize', handleOrientationChange);
@@ -714,15 +793,18 @@ const emojiPickerMenu = document.getElementById('emoji-picker-menu');
 if (emojiToggleBtn) {
     emojiToggleBtn.addEventListener('click', () => {
         emojiPickerMenu.classList.toggle('hidden');
-        emojiToggleBtn.style.color = emojiPickerMenu.classList.contains('hidden') ? '#555' : '#00CED1';
+        emojiToggleBtn.classList.toggle('active', !emojiPickerMenu.classList.contains('hidden'));
+    });
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('#emoji-picker-menu, #emoji-toggle-btn')) { emojiPickerMenu.classList.add('hidden'); emojiToggleBtn.classList.remove('active'); }
     });
 }
 
-function sendReaction(emoji) { 
-    socket.emit('reaction', emoji); 
+function sendReaction(emoji) {
+    socket.emit('reaction', emoji);
     if(emojiPickerMenu) {
         emojiPickerMenu.classList.add('hidden');
-        emojiToggleBtn.style.color = '#555';
+        emojiToggleBtn.classList.remove('active');
     }
 }
 socket.on('reaction', (data) => {
@@ -730,7 +812,8 @@ socket.on('reaction', (data) => {
     if (!chatSection) return;
     const el = document.createElement('div');
     el.className = 'flying-emoji';
-    el.innerText = data.emoji;
+    el.textContent = data.emoji;
+    const who = document.createElement('small'); who.textContent = data.username || ''; el.appendChild(who);
     el.style.left = Math.random() * 60 + 20 + '%';
     el.style.bottom = '10px';
     chatSection.appendChild(el);
